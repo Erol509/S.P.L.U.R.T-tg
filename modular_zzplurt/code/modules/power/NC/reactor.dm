@@ -58,188 +58,183 @@
 	return last_reactor_error
 
 /obj/machinery/reactor/proc/activate()
-	src.process()
-	START_PROCESSING(1)
+	rebuild_links()
 	reactor_status = REACTOR_ONLINE
-	return TRUE
+	src.process()
 
+/obj/machinery/reactor/proc/rebuild_links()
+	// Reset
+	for(var/obj/item/reactor_component/C in grid)
+		if(!C) continue
+		C.adjacent_rods = list()
+		C.linked_heat_acceptors = list()
+		C.linked_vents = list()
 
-/obj/machinery/reactor/proc/process(5 SECONDS)
-	. = ..()
-	if(reactor_status == REACTOR_OFFLINE)
-		reactor_status = REACTOR_OFFLINE
+	// Scan once
+	for(var/y = 1; y <= height; y++)
+		for(var/x = 1; x <= width; x++)
+			var/i = grid_index(x, y)
+			var/obj/item/reactor_component/C = grid[i]
+			if(!C) continue
+
+			for(var/d in list(NORTH, SOUTH, EAST, WEST))
+				var/nx = x + (d == EAST) - (d == WEST)
+				var/ny = y + (d == NORTH) - (d == SOUTH)
+				var/ni = grid_index(nx, ny)
+				if(!ni) continue
+
+				var/obj/item/reactor_component/N = grid[ni]
+				if(!N) continue
+
+				// Rod ↔ Rod
+				if(istype(C, /obj/item/reactor_component/fuel_rod) && istype(N, /obj/item/reactor_component/fuel_rod))
+					C.adjacent_rods += N
+
+				// Rod → heat acceptor
+				if(istype(C, /obj/item/reactor_component/fuel_rod) && !istype(N, /obj/item/reactor_component/fuel_rod))
+					C.linked_heat_acceptors += N
+
+				// Shield → vent
+				if(istype(C, /obj/item/reactor_component/heat_shield) && istype(N, /obj/item/reactor_component/vent))
+					C.linked_vents += N
+
+/obj/machinery/reactor/process()
+	if(reactor_status != REACTOR_ONLINE)
 		return
 
-	// ----- Reset linkage containers on components -----
-	for(var/cell_index = 1; cell_index <= grid.len; cell_index++)
-		if(grid[cell_index]){
-			grid[cell_index].linked_shields = list()
-			grid[cell_index].linked_fuel_rods = list()
-		}
+	last_power_output = 0
 
-	// ----- Link fuel rods to adjacent heat shields -----
-	for(var/pos_x = 1; pos_x <= width; pos_x++)
-		for(var/pos_y = 1; pos_y <= height; pos_y++){
-			var/current_index = grid_index(pos_x, pos_y)
-			if(!current_index) continue
-			var/component = grid[current_index]
-			if(!component) continue
+	// =========================
+	// FUEL RODS
+	// =========================
+	for(var/obj/item/reactor_component/fuel_rod/R in grid)
+		if(!R) continue
 
-			if(istype(component, /obj/item/reactor_component/fuel_rod)){
-				// check the four cardinal neighbors
-				for(var/off_x = -1; off_x <= 1; off_x++)
-					for(var/off_y = -1; off_y <= 1; off_y++){
-						if(abs(off_x) + abs(off_y) != 1) continue
-						var/neighbor_x = pos_x + off_x
-						var/neighbor_y = pos_y + off_y
-						var/neighbor_index = grid_index(neighbor_x, neighbor_y)
-						if(!neighbor_index) continue
-						var/neighbor_component = grid[neighbor_index]
-						if(!neighbor_component) continue
-						if(istype(neighbor_component, /obj/item/reactor_component/heat_shield)){
-							if(!component.linked_shields) component.linked_shields = list()
-							var/exists = FALSE
-							for(var/_shield in component.linked_shields)
-								if(_shield == neighbor_component) { exists = TRUE break }
-							if(!exists) component.linked_shields[component.linked_shields.len + 1] = neighbor_component
+		// --- Pulses (IC2 style)
+		var/pulses = 1
+		if(R.adjacent_rods)
+			pulses += R.adjacent_rods.len
 
-							if(!neighbor_component.linked_fuel_rods) neighbor_component.linked_fuel_rods = list()
-							var/already = FALSE
-							for(var/_rod in neighbor_component.linked_fuel_rods)
-								if(_rod == component) { already = TRUE break }
-							if(!already) neighbor_component.linked_fuel_rods[neighbor_component.linked_fuel_rods.len + 1] = component
-						}
-					}
-			}
-		}
+		var/heat_generated = R.base_heat_gen * pulses
+		var/power_generated = R.base_power_gen * pulses
 
-	// ----- Heat transfer, venting and damage -----
-	for(var/pos_x = 1; pos_x <= width; pos_x++)
-		for(var/pos_y = 1; pos_y <= height; pos_y++){
-			var/current_index = grid_index(pos_x, pos_y)
-			if(!current_index) continue
-			var/component = grid[current_index]
-			if(!component) continue
+		// --- Heat distribution
+		if(R.linked_heat_acceptors && R.linked_heat_acceptors.len)
+			var/share = heat_generated / R.linked_heat_acceptors.len
+			for(var/obj/item/reactor_component/A in R.linked_heat_acceptors)
+				if(!A) continue
+				A.heat_stored = (A.heat_stored || 0) + share
+		else
+			temperature += heat_generated
 
-			// --- Fuel rods: produce heat, distribute to linked shields or core ---
-			if(istype(component, /obj/item/reactor_component/fuel_rod)){
-				var/heat_val = 0
-				if(component.heat_generation) heat_val = component.heat_generation
-				else if(component.heat_gen) heat_val = component.heat_gen
-				var/efficiency = component.efficiency ? component.efficiency : 1.0
-				var/link_count = component.linked_shields ? component.linked_shields.len : 0
-				if(link_count > 0){
-					var/share = (heat_val * efficiency) / link_count
-					for(var/_shield in component.linked_shields)
-						if(_shield) _shield.heat_stored = (_shield.heat_stored ?? 0) + share
-				}else{
-					temperature += heat_val * efficiency
-				}
+		last_power_output += power_generated
 
-				// integrity decay for rod
-				if(!component.integrity) component.integrity = ROD_INTEGRITY_BASE
-				var/decay = max(ROD_INTEGRITY_MIN_DECAY, (heat_val * ROD_DECAY_MULT))
-				component.integrity -= decay
-				if(component.integrity <= 0){
-					grid[current_index] = null
-					qdel(component)
-				}
-			}
+		// --- Rod damage
+		R.integrity ||= ROD_INTEGRITY_BASE
+		R.integrity -= max(ROD_INTEGRITY_MIN_DECAY, heat_generated * ROD_DECAY_MULT)
 
-			// --- Heat shields: pass heat to vents and take damage if overloaded ---
-			if(istype(component, /obj/item/reactor_component/heat_shield)){
-				component.heat_stored = component.heat_stored ?? 0
-				var/adjacent_vents = list()
-				for(var/off_x = -1; off_x <= 1; off_x++)
-					for(var/off_y = -1; off_y <= 1; off_y++){
-						if(abs(off_x) + abs(off_y) != 1) continue
-						var/neighbor_x = pos_x + off_x
-						var/neighbor_y = pos_y + off_y
-						var/neighbor_index = grid_index(neighbor_x, neighbor_y)
-						if(!neighbor_index) continue
-						var/neighbor_component = grid[neighbor_index]
-						if(!neighbor_component) continue
-						if(istype(neighbor_component, /obj/item/reactor_component/vent))
-							adjacent_vents[adjacent_vents.len + 1] = neighbor_component
-					}
+		if(R.integrity <= 0)
+			qdel(R)
 
-				if(adjacent_vents.len > 0 && component.heat_stored > 0){
-					var/transfer_total = component.heat_stored * SHIELD_TO_VENT_TRANSFER_RATIO
-					var/per_vent = transfer_total / adjacent_vents.len
-					for(var/_vent in adjacent_vents)
-						_vent.heat_stored = (_vent.heat_stored ?? 0) + per_vent
-					component.heat_stored -= transfer_total
-				}
+	// =========================
+	// HEAT SHIELDS
+	// =========================
+	for(var/obj/item/reactor_component/heat_shield/S in grid)
+		if(!S) continue
 
-				var/shield_capacity = component.heat_capacity ? component.heat_capacity : SHIELD_DEFAULT_CAPACITY
-				if(component.heat_stored > shield_capacity){
-					if(!component.integrity) component.integrity = SHIELD_INTEGRITY_BASE
-					component.integrity -= (component.heat_stored - shield_capacity) * 0.01
-					if(component.integrity <= 0){
-						var/remove_index = grid_index(pos_x, pos_y)
-						if(remove_index) grid[remove_index] = null
-						qdel(component)
-					}
-				}
-			}
+		S.heat_stored ||= 0
 
-			// --- Vents: dissipate heat and break if overloaded ---
-			if(istype(component, /obj/item/reactor_component/vent)){
-				component.heat_stored = component.heat_stored ?? 0
-				var/cool_rate = VENT_DEFAULT_COOL
-				if(component.heat_gen) cool_rate = abs(component.heat_gen)
-				var/removed = min(component.heat_stored, cool_rate)
-				component.heat_stored -= removed
+		if(S.linked_vents && S.linked_vents.len && S.heat_stored > 0)
+			var/transfer = S.heat_stored * SHIELD_TO_VENT_TRANSFER_RATIO
+			var/per = transfer / S.linked_vents.len
 
-				var/vent_capacity = component.heat_capacity ? component.heat_capacity : VENT_DEFAULT_CAPACITY
-				if(component.heat_stored > vent_capacity){
-					if(!component.integrity) component.integrity = VENT_INTEGRITY_BASE
-					component.integrity -= (component.heat_stored - vent_capacity) * 0.02
-					if(component.integrity <= 0){
-						var/remove_index = grid_index(pos_x, pos_y)
-						if(remove_index) grid[remove_index] = null
-						qdel(component)
-					}
-				}
-			}
-		}
+			for(var/obj/item/reactor_component/vent/V in S.linked_vents)
+				if(!V) continue
+				V.heat_stored = (V.heat_stored || 0) + per
+
+			S.heat_stored -= transfer
+
+		var/capacity = S.heat_capacity || SHIELD_DEFAULT_CAPACITY
+		if(S.heat_stored > capacity)
+			S.integrity ||= SHIELD_INTEGRITY_BASE
+			S.integrity -= (S.heat_stored - capacity) * 0.01
+			if(S.integrity <= 0)
+				qdel(S)
+
+	// =========================
+	// VENTS
+	// =========================
+	for(var/obj/item/reactor_component/vent/V in grid)
+		if(!V) continue
+
+		V.heat_stored ||= 0
+
+		var/cool = abs(V.cool_rate) || VENT_DEFAULT_COOL
+		var/removed = min(V.heat_stored, cool)
+		V.heat_stored -= removed
+
+		var/cap = V.heat_capacity || VENT_DEFAULT_CAPACITY
+		if(V.heat_stored > cap)
+			V.integrity ||= VENT_INTEGRITY_BASE
+			V.integrity -= (V.heat_stored - cap) * 0.02
+			if(V.integrity <= 0)
+				qdel(V)
+
+	// =========================
+	// CORE STATUS
+	// =========================
+	if(temperature >= max_temperature)
+		//reactor_status = REACTOR_MELTDOWN
 
 
 /obj/item/reactor_component
-	/// You should not see it anyways.
 	name = "Generic Reactor Component"
-	icon = 'modular_skyrat/master_files/icons/mob/augmentation/mcgipc.dmi';
+	icon = 'modular_skyrat/master_files/icons/mob/augmentation/mcgipc.dmi'
 	var/id = null
-	var/heat_gen
-	var/heat_stored
-	var/integrity
 
-	/// The power output of this component.
-	var/power_output = 0
-	/// The heat generated by this component.
-	var/heat_generation = 0
-	/// The efficiency of this component (0.0 - 1.0).
+	var/heat_stored = 0
+	var/integrity = 100
+
+	var/component_type
+	var/max_heat = 1000
+
+	// Optional defaults
+	var/heat_capacity = 0
 	var/efficiency = 1.0
+
+	var/list/adjacent_rods = list()
+	var/list/linked_heat_acceptors = list()
+	var/list/linked_vents = list()
+
 
 /obj/item/reactor_component/vent
 	name = "Reactor Vent"
-	icon_state = "robotic_l_leg"
-	efficiency = 1
-	heat_stored = 0
-	heat_gen = -5
+
+	heat_capacity = 800
+	max_heat = 1000
+
+	var/cool_rate = 5
+
 
 /obj/item/reactor_component/fuel_rod
-	icon_state = "robotic_l_leg"
-	name = "Fuel Rod"
-	power_output = 20
-	heat_generation = 10
-	efficiency = 1
+	name = "Uranium Fuel Rod"
+	max_heat = 2000
+
+	var/base_heat_gen = 10
+	var/base_power_gen = 50
+
+	// Runtime calculated
+
+	// Optional scaling
+	var/pulse_bonus = 0.1
+
 
 /obj/item/reactor_component/heat_shield
-	icon_state = "robotic_l_leg"
 	name = "Heat Shield"
-	efficiency = 1
-	heat_stored = 0
+	heat_capacity = 1000
+	max_heat = 1500
+
+
 
 /obj/machinery/reactor/ui_interact(mob/user, datum/tgui/ui)
 	. = ..()

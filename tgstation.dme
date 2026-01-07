@@ -10475,6 +10475,7 @@
 #include "modular_zzplurt\code\modules\plug13\code\masochism.dm"
 #include "modular_zzplurt\code\modules\plug13\code\plug13.dm"
 #include "modular_zzplurt\code\modules\plug13\code\tgui.dm"
+#include "modular_zzplurt\code\modules\power\NC\reactor_defines.dm"
 #include "modular_zzplurt\code\modules\power\NC\reactor.dm"
 #include "modular_zzplurt\code\modules\projectiles\guns\energy\beam_rifle.dm"
 #include "modular_zzplurt\code\modules\projectiles\guns\energy\kinetic_accelerator.dm"
